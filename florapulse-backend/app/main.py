@@ -16,7 +16,6 @@ from app.models import (
     IrrigationDecisionRequest,
     IrrigationDecisionResponse,
     DashboardLiveResponse,
-    ErrorResponse
 )
 from app.database_models import (
     SensorReading,
@@ -24,6 +23,9 @@ from app.database_models import (
     SystemStatus
 )
 from app.config import settings
+from app.services.irrigation_engine import decide_irrigation as engine_decide
+from app.services.prediction_engine import estimate_next_watering
+from app.utils.validators import validate_sensor_data
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -74,16 +76,19 @@ def upload_sensor_data(
 ):
     """
     Upload sensor reading from ESP32.
-    
-    Expected JSON:
-    {
-        "moisture": 45.5,
-        "temperature": 28.3,
-        "humidity": 65.0,
-        "rain_detected": false
-    }
+    Validates data before saving.
     """
     try:
+        # Validate sensor data
+        is_valid, error_msg = validate_sensor_data(
+            moisture=request.moisture,
+            temperature=request.temperature,
+            humidity=request.humidity
+        )
+        
+        if not is_valid:
+            raise HTTPException(status_code=400, detail=error_msg)
+        
         # Create new sensor reading record
         reading = SensorReading(
             moisture=request.moisture,
@@ -100,6 +105,8 @@ def upload_sensor_data(
             id=reading.id,
             saved_at=reading.timestamp
         )
+    except HTTPException:
+        raise
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
@@ -113,10 +120,6 @@ def get_sensor_history(
 ):
     """
     Fetch sensor readings from last N hours.
-    
-    Query params:
-    - hours: How many hours back (default 24)
-    - limit: Max results (default 100)
     """
     try:
         from sqlalchemy import desc
@@ -145,7 +148,6 @@ def get_system_status(db: Session = Depends(get_db)):
         status = db.query(SystemStatus).first()
         
         if not status:
-            # Create default status if none exists
             status = SystemStatus()
             db.add(status)
             db.commit()
@@ -158,50 +160,67 @@ def get_system_status(db: Session = Depends(get_db)):
 # ============ Irrigation Decision Endpoint ============
 
 @app.post("/api/irrigation/decide", response_model=IrrigationDecisionResponse)
-def decide_irrigation(
+def decide_irrigation_endpoint(
     request: IrrigationDecisionRequest,
     db: Session = Depends(get_db)
 ):
     """
-    Make irrigation decision based on soil moisture and weather.
-    
-    Simple rule:
-    - If moisture < THRESHOLD_DRY AND no rain → WATER
-    - Otherwise → SKIP
+    Make irrigation decision using service logic.
+    Uses soil moisture, local rain sensor, and forecasting (coming soon).
     """
     try:
-        threshold_dry = settings.moisture_threshold_dry
-        
-        if request.moisture < threshold_dry and not request.rain_detected:
-            decision = "WATER"
-            reason = f"Soil moisture {request.moisture:.1f}% is below {threshold_dry}% and no rain detected"
-            confidence = 0.95
-        else:
-            decision = "SKIP"
-            if request.moisture >= threshold_dry:
-                reason = f"Soil moisture is adequate at {request.moisture:.1f}%"
-            else:
-                reason = "Rain detected locally, skipping irrigation"
-            confidence = 0.90
+        # Use irrigation engine service
+        result = engine_decide(
+            moisture=request.moisture,
+            rain_detected=request.rain_detected,
+            forecast_rain=False  # Will add weather API in Phase 2
+        )
         
         # Log decision
         irrigation_log = IrrigationDecision(
             moisture_level=request.moisture,
-            decision=decision,
-            reason=reason,
-            confidence=confidence
+            decision=result["decision"],
+            reason=result["reason"],
+            confidence=result["confidence"]
         )
         db.add(irrigation_log)
         db.commit()
         
         return IrrigationDecisionResponse(
-            decision=decision,
-            reason=reason,
-            confidence=confidence
+            decision=result["decision"],
+            reason=result["reason"],
+            confidence=result["confidence"]
         )
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Decision error: {str(e)}")
+
+
+# ============ Prediction Endpoint ============
+
+@app.get("/api/prediction/next-watering")
+def predict_next_watering(db: Session = Depends(get_db)):
+    """
+    Estimate when next watering will be needed.
+    Uses historical depletion rate to predict.
+    """
+    try:
+        # Get latest moisture
+        latest = db.query(SensorReading).order_by(SensorReading.id.desc()).first()
+        
+        if not latest:
+            return {
+                "status": "no_data",
+                "message": "No sensor data available yet",
+                "hours_until_dry": None
+            }
+        
+        # Get prediction
+        prediction = estimate_next_watering(db, latest.moisture)
+        
+        return prediction
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
 
 
 # ============ Dashboard Endpoint ============
@@ -228,6 +247,13 @@ def get_dashboard_live(db: Session = Depends(get_db)):
         # Get system status
         status = db.query(SystemStatus).first()
         
+        # Get next watering estimate
+        estimated_watering = "TBD"
+        if latest_reading:
+            prediction = estimate_next_watering(db, latest_reading.moisture)
+            if prediction["confidence"] > 0:
+                estimated_watering = f"In ~{prediction['hours_until_dry']} hours"
+        
         return DashboardLiveResponse(
             current_moisture=latest_reading.moisture if latest_reading else None,
             current_temperature=latest_reading.temperature if latest_reading else None,
@@ -243,7 +269,7 @@ def get_dashboard_live(db: Session = Depends(get_db)):
                 }
                 for d in recent_decisions
             ],
-            estimated_next_watering="TBD (prediction coming in Phase 2)",
+            estimated_next_watering=estimated_watering,
             last_update=datetime.now()
         )
     except Exception as e:
