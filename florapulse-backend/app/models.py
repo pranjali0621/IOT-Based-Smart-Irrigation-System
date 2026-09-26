@@ -4,6 +4,7 @@ Pydantic schemas for request/response validation.
 from pydantic import BaseModel, Field
 from datetime import datetime
 from typing import Optional
+from pydantic import BaseModel
 
 
 # ============ Requests ============
@@ -97,3 +98,30 @@ class ErrorResponse(BaseModel):
     error_code: str
     message: str
     timestamp: datetime
+
+class SensorDataRequest(BaseModel):
+    sensor_id: str
+    moisture: float
+    temperature: float = None
+    humidity: float = None
+    rain_detected: bool = False
+
+class UserCreate(BaseModel):
+    username: str
+    email: str
+    password: str
+    full_name: str
+
+class UserLogin(BaseModel):
+    username: str
+    password: str
+    
+class UserResponse(BaseModel):
+    id: int
+    username: str
+    email: str
+    full_name: str
+    created_at: datetime
+
+    class Config:
+        orm_mode = True   
