@@ -1,0 +1,583 @@
+from fastapi import FastAPI, HTTPException, Depends, Header, Form
+from sqlalchemy.orm import Session
+from datetime import datetime, timedelta
+import os
+
+# ============= IMPORTS: Database & Models =============
+from app.database import get_db
+from app.config import settings
+from app.database_models import (
+    User, Plant, Sensor, SensorReading, 
+    IrrigationDecision, PumpEvent, SystemStatus
+)
+
+# ============= IMPORTS: Services & Utils =============
+from app.services.irrigation_engine import decide_irrigation
+from app.services.prediction_engine import estimate_next_watering, get_depletion_rate
+from app.utils.validators import validate_sensor_data
+from app.utils.auth import (
+    hash_password, verify_password, 
+    create_access_token, decode_access_token
+)
+
+# ============= IMPORTS: Pydantic Models =============
+from app.models import (
+    SensorDataRequest, 
+    UserCreate, UserLogin, UserResponse
+)
+
+# ============= CREATE APP =============
+app = FastAPI(
+    title="FloraPulse Backend",
+    description="Smart plant irrigation system with sensors and predictions",
+    version="1.0.0"
+)
+
+# ============= STARTUP EVENT =============
+@app.on_event("startup")
+def startup():
+    """Initialize system on startup"""
+    print("🌱 FloraPulse Backend Starting...")
+    print(f"Database: {settings.database_url}")
+    print("✅ System ready")
+
+
+# ============================================================================
+# HEALTH CHECK
+# ============================================================================
+
+@app.get("/health")
+def health_check():
+    """Health check endpoint."""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "service": "FloraPulse Backend"
+    }
+
+
+# ============================================================================
+# AUTHENTICATION ENDPOINTS
+# ============================================================================
+
+@app.post("/api/auth/register")
+def register(user: UserCreate, db: Session = Depends(get_db)):
+    """Register a new user."""
+    existing = db.query(User).filter(
+        (User.username == user.username) | (User.email == user.email)
+    ).first()
+    
+    if existing:
+        raise HTTPException(400, detail="Username or email already exists")
+    
+    new_user = User(
+        username=user.username,
+        email=user.email,
+        password_hash=hash_password(user.password),
+        full_name=user.full_name
+    )
+    
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    
+    return {
+        "id": new_user.id,
+        "username": new_user.username,
+        "email": new_user.email,
+        "message": "User registered successfully"
+    }
+
+
+@app.post("/api/auth/login")
+def login(credentials: UserLogin, db: Session = Depends(get_db)):
+    """Login and receive JWT access token."""
+    user = db.query(User).filter(User.username == credentials.username).first()
+    
+    if not user or not verify_password(credentials.password, user.password_hash):
+        raise HTTPException(401, detail="Invalid credentials")
+    
+    access_token = create_access_token(
+        data={"sub": user.username, "user_id": user.id}
+    )
+    
+    user.last_login = datetime.now()
+    db.commit()
+    
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "full_name": user.full_name
+        }
+    }
+
+
+@app.get("/api/auth/me")
+def get_current_user(authorization: str = Header(None), db: Session = Depends(get_db)):
+    """Get current authenticated user info."""
+    if not authorization:
+        raise HTTPException(401, detail="Not authenticated")
+    
+    if authorization.startswith("Bearer "):
+        token = authorization[7:]
+    else:
+        token = authorization
+    
+    token_data = decode_access_token(token)
+    if not token_data:
+        raise HTTPException(401, detail="Invalid token")
+    
+    user = db.query(User).filter(User.id == token_data["user_id"]).first()
+    if not user:
+        raise HTTPException(404, detail="User not found")
+    
+    return {
+        "id": user.id,
+        "username": user.username,
+        "email": user.email,
+        "full_name": user.full_name
+    }
+
+
+# ============================================================================
+# PLANT MANAGEMENT ENDPOINTS
+# ============================================================================
+
+@app.post("/api/plants/create")
+def create_plant(
+    name: str = Form(...),
+    species: str = Form(...),
+    location: str = Form(default="Unknown"),
+    description: str = Form(default=""),
+    authorization: str = Header(None),
+    db: Session = Depends(get_db)
+):
+    """Create a new plant for authenticated user."""
+    if not authorization:
+        raise HTTPException(401, detail="Not authenticated")
+    
+    if authorization.startswith("Bearer "):
+        token = authorization[7:]
+    else:
+        token = authorization
+    
+    token_data = decode_access_token(token)
+    if not token_data:
+        raise HTTPException(401, detail="Invalid token")
+    
+    user = db.query(User).filter(User.id == token_data["user_id"]).first()
+    if not user:
+        raise HTTPException(404, detail="User not found")
+    
+    new_plant = Plant(
+        user_id=user.id,
+        name=name,
+        species=species,
+        location=location,
+        description=description
+    )
+    
+    db.add(new_plant)
+    db.commit()
+    db.refresh(new_plant)
+    
+    return {
+        "id": new_plant.id,
+        "name": new_plant.name,
+        "species": new_plant.species,
+        "location": new_plant.location,
+        "created_at": new_plant.created_at,
+        "message": "Plant created successfully"
+    }
+
+
+@app.get("/api/plants/my-plants")
+def get_user_plants(authorization: str = Header(None), db: Session = Depends(get_db)):
+    """Get all plants for authenticated user."""
+    if not authorization:
+        raise HTTPException(401, detail="Not authenticated")
+    
+    if authorization.startswith("Bearer "):
+        token = authorization[7:]
+    else:
+        token = authorization
+    
+    token_data = decode_access_token(token)
+    if not token_data:
+        raise HTTPException(401, detail="Invalid token")
+    
+    plants = db.query(Plant).filter(Plant.user_id == token_data["user_id"]).all()
+    
+    return {
+        "plants": [
+            {
+                "id": p.id,
+                "name": p.name,
+                "species": p.species,
+                "location": p.location,
+                "created_at": p.created_at,
+                "sensors_count": len(p.sensors)
+            }
+            for p in plants
+        ]
+    }
+
+
+@app.get("/api/plants/{plant_id}")
+def get_plant_details(
+    plant_id: int,
+    authorization: str = Header(None),
+    db: Session = Depends(get_db)
+):
+    """Get plant details including sensors and latest readings."""
+    if not authorization:
+        raise HTTPException(401, detail="Not authenticated")
+    
+    if authorization.startswith("Bearer "):
+        token = authorization[7:]
+    else:
+        token = authorization
+    
+    token_data = decode_access_token(token)
+    if not token_data:
+        raise HTTPException(401, detail="Invalid token")
+    
+    plant = db.query(Plant).filter(
+        Plant.id == plant_id,
+        Plant.user_id == token_data["user_id"]
+    ).first()
+    
+    if not plant:
+        raise HTTPException(404, detail="Plant not found")
+    
+    return {
+        "id": plant.id,
+        "name": plant.name,
+        "species": plant.species,
+        "location": plant.location,
+        "description": plant.description,
+        "created_at": plant.created_at,
+        "sensors_count": len(plant.sensors)
+    }
+
+
+# ============================================================================
+# SENSOR MANAGEMENT ENDPOINTS
+# ============================================================================
+
+@app.post("/api/sensors/register")
+def register_sensor(
+    plant_id: int = Form(...),
+    sensor_id: str = Form(...),
+    sensor_name: str = Form(...),
+    authorization: str = Header(None),
+    db: Session = Depends(get_db)
+):
+    """Register a sensor for a plant."""
+    if not authorization:
+        raise HTTPException(401, detail="Not authenticated")
+    
+    if authorization.startswith("Bearer "):
+        token = authorization[7:]
+    else:
+        token = authorization
+    
+    token_data = decode_access_token(token)
+    if not token_data:
+        raise HTTPException(401, detail="Invalid token")
+    
+    plant = db.query(Plant).filter(
+        Plant.id == plant_id,
+        Plant.user_id == token_data["user_id"]
+    ).first()
+    
+    if not plant:
+        raise HTTPException(404, detail="Plant not found")
+    
+    existing = db.query(Sensor).filter(Sensor.sensor_id == sensor_id).first()
+    if existing:
+        raise HTTPException(400, detail="Sensor ID already registered")
+    
+    new_sensor = Sensor(
+        plant_id=plant_id,
+        sensor_id=sensor_id,
+        sensor_name=sensor_name,
+        is_connected=False
+    )
+    
+    db.add(new_sensor)
+    db.commit()
+    db.refresh(new_sensor)
+    
+    return {
+        "sensor_id": new_sensor.sensor_id,
+        "plant_id": plant_id,
+        "message": "Sensor registered successfully"
+    }
+
+
+@app.get("/api/sensors/{sensor_id}/status")
+def get_sensor_status(sensor_id: str, db: Session = Depends(get_db)):
+    """Get sensor connection status and latest reading."""
+    sensor = db.query(Sensor).filter(Sensor.sensor_id == sensor_id).first()
+    
+    if not sensor:
+        raise HTTPException(404, detail="Sensor not found")
+    
+    latest_reading = db.query(SensorReading)\
+        .filter(SensorReading.sensor_id == sensor.id)\
+        .order_by(SensorReading.timestamp.desc())\
+        .first()
+    
+    return {
+        "sensor_id": sensor.sensor_id,
+        "sensor_name": sensor.sensor_name,
+        "plant_id": sensor.plant_id,
+        "is_connected": sensor.is_connected,
+        "last_data_received": sensor.last_data_received,
+        "latest_moisture": latest_reading.moisture if latest_reading else None,
+        "latest_temperature": latest_reading.temperature if latest_reading else None,
+        "latest_timestamp": latest_reading.timestamp if latest_reading else None
+    }
+
+
+# ============================================================================
+# SENSOR DATA ENDPOINTS
+# ============================================================================
+
+@app.post("/api/sensor-data/upload")
+def upload_sensor_data(request: SensorDataRequest, db: Session = Depends(get_db)):
+    """Upload sensor data from ESP32."""
+    is_valid, message = validate_sensor_data(
+        request.moisture,
+        request.temperature,
+        request.humidity
+    )
+    
+    if not is_valid:
+        raise HTTPException(400, detail=message)
+    
+    sensor = db.query(Sensor).filter(Sensor.sensor_id == request.sensor_id).first()
+    
+    if not sensor:
+        raise HTTPException(404, detail=f"Sensor {request.sensor_id} not registered")
+    
+    sensor.is_connected = True
+    sensor.last_data_received = datetime.now()
+    
+    reading = SensorReading(
+        sensor_id=sensor.id,
+        moisture=request.moisture,
+        temperature=request.temperature,
+        humidity=request.humidity,
+        rain_detected=request.rain_detected
+    )
+    
+    decision_result = decide_irrigation(
+        request.moisture,
+        request.rain_detected
+    )
+    
+    decision = IrrigationDecision(
+        plant_id=sensor.plant_id,
+        moisture_level=request.moisture,
+        decision=decision_result["decision"],
+        reason=decision_result["reason"],
+        confidence=decision_result["confidence"]
+    )
+    
+    db.add_all([reading, decision, sensor])
+    db.commit()
+    
+    return {
+        "status": "success",
+        "reading_id": reading.id,
+        "plant_id": sensor.plant_id,
+        "sensor_id": sensor.sensor_id,
+        "decision": decision_result["decision"],
+        "confidence": decision_result["confidence"]
+    }
+
+
+@app.get("/api/sensor-data/history")
+def get_sensor_history(
+    hours: int = 24,
+    limit: int = 100,
+    sensor_id: str = None,
+    db: Session = Depends(get_db)
+):
+    """Get historical sensor readings."""
+    cutoff_time = datetime.now() - timedelta(hours=hours)
+    
+    query = db.query(SensorReading).filter(
+        SensorReading.timestamp >= cutoff_time
+    )
+    
+    if sensor_id:
+        sensor = db.query(Sensor).filter(Sensor.sensor_id == sensor_id).first()
+        if sensor:
+            query = query.filter(SensorReading.sensor_id == sensor.id)
+    
+    readings = query.order_by(SensorReading.timestamp.desc()).limit(limit).all()
+    
+    return {
+        "readings": [
+            {
+                "id": r.id,
+                "moisture": r.moisture,
+                "temperature": r.temperature,
+                "humidity": r.humidity,
+                "rain_detected": r.rain_detected,
+                "timestamp": r.timestamp
+            }
+            for r in readings
+        ]
+    }
+
+
+# ============================================================================
+# SYSTEM STATUS ENDPOINTS
+# ============================================================================
+
+@app.get("/api/status")
+def get_system_status(db: Session = Depends(get_db)):
+    """Get current system status."""
+    latest_reading = db.query(SensorReading)\
+        .order_by(SensorReading.timestamp.desc())\
+        .first()
+    
+    if not latest_reading:
+        raise HTTPException(404, detail="No sensor data available")
+    
+    return {
+        "status": "operational",
+        "last_moisture": latest_reading.moisture,
+        "last_temperature": latest_reading.temperature,
+        "last_humidity": latest_reading.humidity,
+        "last_update": latest_reading.timestamp
+    }
+
+
+# ============================================================================
+# IRRIGATION DECISION ENDPOINTS
+# ============================================================================
+
+@app.post("/api/irrigation/decide")
+def get_irrigation_decision(request: SensorDataRequest, db: Session = Depends(get_db)):
+    """Get irrigation decision for current conditions."""
+    result = decide_irrigation(
+        request.moisture,
+        request.rain_detected
+    )
+    
+    return result
+
+
+# ============================================================================
+# PREDICTION ENDPOINTS
+# ============================================================================
+
+@app.get("/api/prediction/next-watering")
+def get_next_watering_prediction(
+    sensor_id: str = None,
+    current_moisture: float = None,
+    db: Session = Depends(get_db)
+):
+    """Estimate when next watering will be needed."""
+    if current_moisture is None:
+        if sensor_id:
+            sensor = db.query(Sensor).filter(Sensor.sensor_id == sensor_id).first()
+            if not sensor:
+                raise HTTPException(404, detail="Sensor not found")
+            
+            latest = db.query(SensorReading)\
+                .filter(SensorReading.sensor_id == sensor.id)\
+                .order_by(SensorReading.timestamp.desc())\
+                .first()
+            
+            if not latest:
+                raise HTTPException(404, detail="No sensor data available")
+            
+            current_moisture = latest.moisture
+        else:
+            latest = db.query(SensorReading)\
+                .order_by(SensorReading.timestamp.desc())\
+                .first()
+            
+            if not latest:
+                raise HTTPException(404, detail="No sensor data available")
+            
+            current_moisture = latest.moisture
+    
+    prediction = estimate_next_watering(db, current_moisture)
+    
+    return prediction
+
+
+# ============================================================================
+# DASHBOARD ENDPOINTS
+# ============================================================================
+
+@app.get("/api/dashboard/live")
+def get_dashboard_data(db: Session = Depends(get_db)):
+    """Get aggregated data for dashboard."""
+    latest_reading = db.query(SensorReading)\
+        .order_by(SensorReading.timestamp.desc())\
+        .first()
+    
+    if not latest_reading:
+        raise HTTPException(404, detail="No sensor data available")
+    
+    recent = db.query(SensorReading)\
+        .order_by(SensorReading.timestamp.desc())\
+        .limit(10)\
+        .all()
+    
+    latest_decision = db.query(IrrigationDecision)\
+        .order_by(IrrigationDecision.timestamp.desc())\
+        .first()
+    
+    prediction = estimate_next_watering(db, latest_reading.moisture)
+    
+    return {
+        "latest_reading": {
+            "moisture": latest_reading.moisture,
+            "temperature": latest_reading.temperature,
+            "humidity": latest_reading.humidity,
+            "timestamp": latest_reading.timestamp
+        },
+        "recent_readings": [
+            {
+                "moisture": r.moisture,
+                "temperature": r.temperature,
+                "humidity": r.humidity,
+                "timestamp": r.timestamp
+            }
+            for r in recent
+        ],
+        "latest_decision": {
+            "decision": latest_decision.decision if latest_decision else None,
+            "reason": latest_decision.reason if latest_decision else None,
+            "confidence": latest_decision.confidence if latest_decision else None,
+            "timestamp": latest_decision.timestamp if latest_decision else None
+        } if latest_decision else None,
+        "prediction": prediction
+    }
+
+
+# ============================================================================
+# ROOT ENDPOINT
+# ============================================================================
+
+@app.get("/")
+def root():
+    """Root endpoint - redirects to API docs"""
+    return {
+        "message": "🌱 FloraPulse Backend API",
+        "docs": "http://localhost:8000/docs",
+        "version": "1.0.0"
+    }
