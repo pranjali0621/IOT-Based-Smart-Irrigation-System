@@ -122,7 +122,8 @@ st.markdown(
 clicked = st.button("Create Your Garden", key="create_garden_btn")
 
 if clicked:
-    if Path(__file__).with_name("garden.py").exists():
-        st.switch_page("garden.py")
+    garden_path = Path(__file__).parent / "5_Garden.py"
+    if garden_path.exists():
+        st.switch_page("pages/5_Garden.py")
     else:
-        st.toast("Let's create your garden! 🌱")
+        st.toast("Garden page not found. Please add pages/5_Garden.py", icon="⚠️")

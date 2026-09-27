@@ -270,7 +270,7 @@ def signup_page() -> None:
             else:
                 st.session_state.user = identifier.strip()
                 st.toast("Welcome aboard! Your account has been created.", icon="🌱")
-                st.switch_page("create.py")
+                st.switch_page("pages/4_Create.py")
         if google:
             st.toast("Google sign-in isn't connected yet. Add your OAuth flow here.", icon="ℹ️")
 

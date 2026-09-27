@@ -252,11 +252,11 @@ def handle_login() -> None:
 
     # TODO: replace with real authentication (database / API / hashed check)
     st.session_state.user = user
-    st.switch_page("create.py")
+    st.switch_page("pages/4_Create.py")
 
 
 def go_to_signup() -> None:
-    st.switch_page("signup.py")
+    st.switch_page("pages/3_Sign_Up.py")
 
 
 # ----------------------------------------------------------------------------
@@ -282,10 +282,13 @@ def login_page() -> None:
         st.text_input("Password", type="password", key="login_pwd",
                       label_visibility="collapsed")
 
+        # Forgot password button
         st.button("Forgot password?", key="forgot_btn", on_click=go, args=("forgot",))
+        # Login button
         st.button("Login", key="login_btn", on_click=handle_login)
-        st.button("Create account ? Sign up ➔", key="signup_btn",
-                  on_click=go_to_signup)
+        # Sign up navigation button
+        if st.button("Create account ? Sign up ➔", key="signup_btn"):
+            st.switch_page("pages/3_Sign_Up.py")
 
 
 def simple_page(title: str, message: str) -> None:

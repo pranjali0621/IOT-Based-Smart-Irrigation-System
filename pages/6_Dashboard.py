@@ -317,7 +317,7 @@ def water_now() -> None:
 
 def logout() -> None:
     st.session_state.pop("user", None)
-    st.switch_page("login.py")
+    st.switch_page("pages/2_Login.py")
 
 
 def reset_demo() -> None:
@@ -467,7 +467,7 @@ def panel(view: str) -> None:
     with st.container(key="panel"):
         html(f'<div class="h">{view}</div>')
         if view == "My plants":
-            st.button("＋ Add a plant", key="add_plant", on_click=st.switch_page, args=("garden.py",))
+            st.button("＋ Add a plant", key="add_plant", on_click=st.switch_page, args=("pages/5_Garden.py",))
             items = list(ss.plants.items())
             for i in range(0, len(items), 3):
                 for col, (n, p) in zip(st.columns(3), items[i:i + 3]):

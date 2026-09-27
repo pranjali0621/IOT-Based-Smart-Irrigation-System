@@ -557,3 +557,11 @@ with right_col:
                 '<div class="status-text">No plant added yet.</div>',
                 unsafe_allow_html=True,
             )
+# Navigation buttons
+col1, col2 = st.columns(2, gap="small")
+with col1:
+    if st.button("Go to Dashboard", key="dashboard_btn"):
+        st.switch_page("pages/6_Dashboard.py")
+with col2:
+    if st.button("About", key="about_btn"):
+        st.switch_page("pages/7_About.py")
