@@ -11,10 +11,24 @@ from pydantic import BaseModel
 
 class SensorDataRequest(BaseModel):
     """Schema for incoming sensor data from ESP32."""
+    sensor_id: str
     moisture: float = Field(..., ge=0, le=100, description="Soil moisture 0-100%")
-    temperature: Optional[float] = Field(None, ge=-40, le=80, description="Temperature in °C")
-    humidity: Optional[float] = Field(None, ge=0, le=100, description="Humidity 0-100%")
-    rain_detected: bool = Field(False, description="Is rain detected?")
+    temperature: Optional[float] = Field(
+        None,
+        ge=-40,
+        le=80,
+        description="Temperature in °C"
+    )
+    humidity: Optional[float] = Field(
+        None,
+        ge=0,
+        le=100,
+        description="Humidity 0-100%"
+    )
+    rain_detected: bool = Field(
+        False,
+        description="Is rain detected?"
+    )
 
 
 class IrrigationDecisionRequest(BaseModel):
@@ -76,9 +90,12 @@ class SystemStatusResponse(BaseModel):
 
 class IrrigationDecisionResponse(BaseModel):
     """Response for irrigation decision."""
-    decision: str  # "WATER", "SKIP", "MONITOR"
+    decision: str
     reason: str
     confidence: float
+    forecast_rain_probability: float
+    sensor_rain_detected: bool
+    current_moisture: float
 
 
 class DashboardLiveResponse(BaseModel):
@@ -99,12 +116,6 @@ class ErrorResponse(BaseModel):
     message: str
     timestamp: datetime
 
-class SensorDataRequest(BaseModel):
-    sensor_id: str
-    moisture: float
-    temperature: float = None
-    humidity: float = None
-    rain_detected: bool = False
 
 class UserCreate(BaseModel):
     username: str

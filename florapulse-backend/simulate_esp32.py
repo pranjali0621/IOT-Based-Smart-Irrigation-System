@@ -30,6 +30,7 @@ def generate_sensor_data():
         dict: Sensor data matching SensorDataRequest schema
     """
     return {
+        "sensor_id": "ESP32_DEMO_001",
         "moisture": round(random.uniform(MOISTURE_MIN, MOISTURE_MAX), 1),
         "temperature": round(random.uniform(TEMPERATURE_MIN, TEMPERATURE_MAX), 1),
         "humidity": round(random.uniform(HUMIDITY_MIN, HUMIDITY_MAX), 1),

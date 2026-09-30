@@ -32,214 +32,331 @@ Example:
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from datetime import datetime, timedelta
-from app.database_models import SensorReading
 from app.config import settings
+from app.database_models import SensorReading, Sensor, PumpEvent
 
 
-def get_depletion_rate(db: Session, hours: int = 24) -> dict:
+def calculate_depletion_rate(
+    db: Session,
+    plant_id: int,
+    hours_lookback: int = 24
+) -> dict:
     """
-    Calculate soil moisture depletion rate from historical data.
-    
-    Analyzes how fast soil moisture decreases over a time period.
-    Returns empirical rate (actual observed decrease).
-    
-    The depletion rate includes:
-    - Plant water uptake (roots absorbing moisture)
-    - Soil surface evaporation
-    - All weather effects (sun, wind, humidity)
-    
-    Needs minimum 2 readings to calculate (start and end points).
-    
+    Calculate soil moisture depletion rate for a specific plant.
+
+    Analyzes sensor readings from the last N hours and calculates
+    how quickly soil moisture is decreasing.
+
+    Watering events are excluded because they artificially increase
+    soil moisture and would distort the depletion rate.
+
     Args:
-        db (Session): Database session
-        hours (int, optional): How many hours back to analyze (default 24)
-            - 24: Last 24 hours (daily rate)
-            - 48: Last 48 hours (includes full day/night cycle)
-            - Used in estimate_next_watering with 48 hours
-        
+        db: Database session
+        plant_id: ID of the plant
+        hours_lookback: Number of hours of historical data to analyze
+
     Returns:
-        dict: Analysis results with keys:
-            - depletion_rate (float): %/hour (how fast soil dries)
-            - readings_analyzed (int): Number of readings used
-            - time_period_hours (float): Actual time span analyzed
-            - is_valid (bool): Whether calculation succeeded
-            - reason (str): If not valid, why not
-            - first_moisture (float): Initial moisture %
-            - last_moisture (float): Final moisture %
-            - change (float): Total change in %
-            
-    Example:
-        >>> rate = get_depletion_rate(db, hours=48)
-        >>> rate['depletion_rate']
-        0.833  # 0.833% per hour
-        >>> rate['readings_analyzed']
-        96  # About 2 readings per hour
-    
-    Notes:
-        - Depletion rate can be negative if soil is increasing (watering/rain)
-        - Minimum 2 readings required (start and end)
-        - Returns early if insufficient data
+        dict containing:
+            - depletion_rate_per_hour
+            - hours_analyzed
+            - data_quality
+            - confidence
     """
-    # Calculate cutoff time (now minus N hours)
-    cutoff_time = datetime.now() - timedelta(hours=hours)
-    
-    # Query readings from database
-    readings = db.query(SensorReading)\
-        .filter(SensorReading.timestamp >= cutoff_time)\
-        .order_by(SensorReading.timestamp.asc())\
+
+    # Calculate lookback period
+    cutoff_time = datetime.now() - timedelta(hours=hours_lookback)
+
+    # Get sensor readings belonging to this plant
+    readings = (
+        db.query(SensorReading)
+        .join(Sensor, SensorReading.sensor_id == Sensor.id)
+        .filter(
+            Sensor.plant_id == plant_id,
+            SensorReading.timestamp >= cutoff_time
+        )
+        .order_by(SensorReading.timestamp.asc())
         .all()
-    
-    # Check minimum data requirement
+    )
+
+    # Step 6: Not enough data
     if len(readings) < 2:
         return {
-            "depletion_rate": 0.0,
-            "readings_analyzed": len(readings),
-            "time_period_hours": hours,
-            "is_valid": False,
-            "reason": "Insufficient data (need at least 2 readings)"
-        }
-    
-    # Extract first and last moisture values
-    first_moisture = readings[0].moisture
-    last_moisture = readings[-1].moisture
-    
-    # Calculate time difference in hours
-    time_diff = (readings[-1].timestamp - readings[0].timestamp).total_seconds() / 3600
-    
-    # Calculate depletion rate (%/hour)
-    # Formula: (initial - final) / hours = rate
-    if time_diff > 0:
-        depletion_rate = (first_moisture - last_moisture) / time_diff
-    else:
-        depletion_rate = 0.0
-    
-    return {
-        "depletion_rate": round(depletion_rate, 3),
-        "readings_analyzed": len(readings),
-        "time_period_hours": round(time_diff, 1),
-        "is_valid": True,
-        "first_moisture": round(first_moisture, 1),
-        "last_moisture": round(last_moisture, 1),
-        "change": round(first_moisture - last_moisture, 1)
-    }
-
-
-def estimate_next_watering(db: Session, current_moisture: float) -> dict:
-    """
-    Estimate hours until next watering is needed.
-    
-    Uses empirical depletion rate to predict when soil reaches dry threshold.
-    
-    Formula:
-        hours_until_dry = (current_moisture - threshold_dry) / depletion_rate
-    
-    Example with numbers:
-        - Current moisture: 60%
-        - Dry threshold: 35%
-        - Depletion rate: 1% per hour
-        - Hours until dry: (60 - 35) / 1 = 25 hours
-        - Estimated time: ~25 hours from now
-    
-    Confidence decreases with prediction distance:
-        - < 24 hours: 0.85 (high, near-term reliable)
-        - 24-48 hours: 0.75 (moderate, medium-term less certain)
-        - > 48 hours: 0.60 (low, far predictions speculative)
-    
-    Args:
-        db (Session): Database session
-        current_moisture (float): Current soil moisture % (0-100, validated)
-        
-    Returns:
-        dict: Prediction with keys:
-            - hours_until_dry (float): Hours until reaching dry threshold
-            - estimated_time (str): ISO format datetime
-            - confidence (float): 0.0-1.0, how reliable prediction is
-            - message (str): User-friendly summary
-            - details (dict): Calculation details
-                - current_moisture
-                - threshold_dry
-                - depletion_rate
-                - readings_analyzed
-                - analysis_period_hours
-                
-    Example:
-        >>> pred = estimate_next_watering(db, current_moisture=55)
-        >>> pred['hours_until_dry']
-        18.5
-        >>> pred['confidence']
-        0.85
-        >>> pred['message']
-        'Estimated watering needed in 18.5 hours'
-    
-    Error Cases:
-        - Not enough data: confidence=0.0, message explains
-        - Soil stable/increasing: confidence=0.0, no watering needed
-        - Already dry: hours_until_dry=0.0, water immediately
-    """
-    # Load dry threshold from config
-    threshold_dry = settings.moisture_threshold_dry  # 35%
-    
-    # Get depletion rate from last 48 hours (full day/night cycle)
-    rate_info = get_depletion_rate(db, hours=48)
-    
-    # Check if we have valid depletion data
-    if not rate_info["is_valid"]:
-        return {
-            "hours_until_dry": None,
-            "estimated_time": None,
+            "depletion_rate_per_hour": 0.0,
+            "hours_analyzed": 0.0,
+            "data_quality": "LOW",
             "confidence": 0.0,
-            "message": rate_info.get("reason", "Cannot calculate"),
-            "details": rate_info
+            "readings_analyzed": len(readings),
+            "message": "Insufficient data. Need at least 2 readings."
         }
-    
-    # Extract depletion rate
-    depletion_rate = rate_info["depletion_rate"]
-    
-    # Handle non-drying soil (stable or increasing moisture)
+
+    # Get watering events during the same period
+    watering_events = (
+        db.query(PumpEvent)
+        .filter(
+            PumpEvent.plant_id == plant_id,
+            PumpEvent.timestamp >= cutoff_time
+        )
+        .order_by(PumpEvent.timestamp.asc())
+        .all()
+    )
+
+    # Step 8: Filter out readings affected by watering
+    valid_readings = []
+
+    for reading in readings:
+
+        # Check whether this reading happened after a watering event
+        affected_by_watering = False
+
+        for event in watering_events:
+            if event.timestamp <= reading.timestamp:
+                # Ignore readings immediately after watering
+                time_since_watering = (
+                    reading.timestamp - event.timestamp
+                ).total_seconds() / 3600
+
+                if time_since_watering < 1:
+                    affected_by_watering = True
+                    break
+
+        if not affected_by_watering:
+            valid_readings.append(reading)
+
+    # Need at least 2 valid readings
+    if len(valid_readings) < 2:
+        return {
+            "depletion_rate_per_hour": 0.0,
+            "hours_analyzed": 0.0,
+            "data_quality": "LOW",
+            "confidence": 0.0,
+            "readings_analyzed": len(valid_readings),
+            "message": "Not enough valid readings after filtering watering events."
+        }
+
+    # Step 7: Get first and last valid readings
+    first_reading = valid_readings[0]
+    last_reading = valid_readings[-1]
+
+    moisture_start = first_reading.moisture
+    moisture_end = last_reading.moisture
+
+    # Calculate elapsed time
+    hours_elapsed = (
+        last_reading.timestamp - first_reading.timestamp
+    ).total_seconds() / 3600
+
+    # Avoid division by zero
+    if hours_elapsed <= 0:
+        return {
+            "depletion_rate_per_hour": 0.0,
+            "hours_analyzed": 0.0,
+            "data_quality": "LOW",
+            "confidence": 0.0,
+            "readings_analyzed": len(valid_readings),
+            "message": "Invalid timestamps."
+        }
+
+    # Calculate depletion
+    depletion = moisture_start - moisture_end
+
+    # Step 9: Moisture increased or stayed the same
+    if depletion <= 0:
+        return {
+            "depletion_rate_per_hour": 0.0,
+            "hours_analyzed": round(hours_elapsed, 1),
+            "data_quality": "MEDIUM",
+            "confidence": 0.3,
+            "readings_analyzed": len(valid_readings),
+            "message": "Moisture did not decrease during the analysis period."
+        }
+
+    # Calculate depletion rate
+    depletion_rate = depletion / hours_elapsed
+
+    # Step 9: Reject unreasonable depletion rate
+    if depletion_rate > 10:
+        return {
+            "depletion_rate_per_hour": 0.0,
+            "hours_analyzed": round(hours_elapsed, 1),
+            "data_quality": "LOW",
+            "confidence": 0.2,
+            "readings_analyzed": len(valid_readings),
+            "message": "Depletion rate is too high (>10% per hour)."
+        }
+
+    # Step 10: Determine data quality
+    if len(valid_readings) >= 20:
+        data_quality = "HIGH"
+        confidence = 0.90
+    elif len(valid_readings) >= 10:
+        data_quality = "MEDIUM"
+        confidence = 0.70
+    else:
+        data_quality = "LOW"
+        confidence = 0.50
+
+    return {
+        "depletion_rate_per_hour": round(depletion_rate, 3),
+        "hours_analyzed": round(hours_elapsed, 1),
+        "data_quality": data_quality,
+        "confidence": confidence,
+        "readings_analyzed": len(valid_readings),
+        "moisture_start": round(moisture_start, 1),
+        "moisture_end": round(moisture_end, 1),
+        "moisture_depletion": round(depletion, 1),
+        "message": (
+            f"Soil moisture is decreasing at "
+            f"{round(depletion_rate, 3)}% per hour."
+        )
+    }
+def predict_next_watering(
+    db: Session,
+    plant_id: int
+) -> dict:
+    """
+    Predict when a plant will next require watering.
+
+    Uses the latest soil moisture reading and the depletion rate
+    calculated from historical sensor data.
+
+    Args:
+        db: Database session
+        plant_id: ID of the plant
+
+    Returns:
+        dict containing:
+            - next_watering_in_hours
+            - estimated_datetime
+            - estimated_time_friendly
+            - current_moisture
+            - watering_threshold
+            - depletion_rate_per_hour
+            - data_quality
+            - confidence
+            - status
+    """
+
+    # Step 2: Get watering threshold from configuration
+    watering_threshold = settings.moisture_threshold_dry
+
+    # Step 4: Get latest reading for this plant
+    latest_reading = (
+        db.query(SensorReading)
+        .join(Sensor, SensorReading.sensor_id == Sensor.id)
+        .filter(Sensor.plant_id == plant_id)
+        .order_by(SensorReading.timestamp.desc())
+        .first()
+    )
+
+    # Handle no sensor data
+    if latest_reading is None:
+        return {
+            "next_watering_in_hours": None,
+            "estimated_datetime": None,
+            "estimated_time_friendly": None,
+            "current_moisture": None,
+            "watering_threshold": watering_threshold,
+            "depletion_rate_per_hour": None,
+            "data_quality": "LOW",
+            "confidence": 0,
+            "status": "INSUFFICIENT_DATA",
+            "message": "No sensor readings available for this plant."
+        }
+
+    current_moisture = latest_reading.moisture
+
+    # Step 5: Get depletion rate from Task 3
+    rate_info = calculate_depletion_rate(
+        db,
+        plant_id=plant_id,
+        hours_lookback=24
+    )
+
+    depletion_rate = rate_info["depletion_rate_per_hour"]
+
+    # Step 10.1: Already below watering threshold
+    if current_moisture <= watering_threshold:
+        return {
+            "next_watering_in_hours": 0.0,
+            "estimated_datetime": datetime.now().isoformat(),
+            "estimated_time_friendly": "WATER NOW",
+            "current_moisture": round(current_moisture, 1),
+            "watering_threshold": watering_threshold,
+            "depletion_rate_per_hour": round(depletion_rate, 3),
+            "data_quality": rate_info["data_quality"],
+            "confidence": max(rate_info["confidence"] * 100, 30),
+            "status": "WATER_NOW",
+            "message": "Soil moisture is already at or below the watering threshold."
+        }
+
+    # Step 10.2: No depletion / stable plant
     if depletion_rate <= 0:
         return {
-            "hours_until_dry": None,
-            "estimated_time": None,
-            "confidence": 0.0,
-            "message": "Soil moisture stable or increasing (no depletion)",
-            "details": rate_info,
-            "note": "Could be recent rain or watering"
+            "next_watering_in_hours": None,
+            "estimated_datetime": None,
+            "estimated_time_friendly": "Not needed in the near term",
+            "current_moisture": round(current_moisture, 1),
+            "watering_threshold": watering_threshold,
+            "depletion_rate_per_hour": round(depletion_rate, 3),
+            "data_quality": rate_info["data_quality"],
+            "confidence": round(rate_info["confidence"] * 100),
+            "status": "MONITORING",
+            "message": "Plant moisture is stable or increasing."
         }
-    
-    # Calculate buffer (how much above dry threshold)
-    moisture_buffer = current_moisture - threshold_dry
-    
-    # Special case: Already dry
-    if moisture_buffer <= 0:
-        hours_until_dry = 0.0
-        confidence = 1.0
+
+    # Step 6: Calculate hours until watering
+    moisture_buffer = current_moisture - watering_threshold
+
+    hours_until_watering = (
+        moisture_buffer / depletion_rate
+    )
+
+    # Step 7: Calculate estimated datetime
+    now = datetime.now()
+
+    estimated_datetime = (
+        now + timedelta(hours=hours_until_watering)
+    )
+
+    # Friendly time format
+    if estimated_datetime.date() == now.date():
+        estimated_time_friendly = (
+            estimated_datetime.strftime("%-I:%M %p") + " today"
+        )
+    elif estimated_datetime.date() == (
+        now + timedelta(days=1)
+    ).date():
+        estimated_time_friendly = (
+            estimated_datetime.strftime("%-I:%M %p") + " tomorrow"
+        )
     else:
-        # Normal case: Calculate hours until dry
-        # Formula: buffer / rate = hours
-        hours_until_dry = moisture_buffer / depletion_rate
-        
-        # Set confidence based on prediction distance
-        # (farther = less reliable)
-        if hours_until_dry < 24:
-            confidence = 0.85   # Near-term, reliable
-        elif hours_until_dry < 48:
-            confidence = 0.75   # Medium-term, moderately reliable
-        else:
-            confidence = 0.60   # Far-term, speculative
-    
-    # Calculate actual estimated time
-    estimated_time = datetime.now() + timedelta(hours=hours_until_dry)
-    
+        estimated_time_friendly = estimated_datetime.strftime(
+            "%b %d, %-I:%M %p"
+        )
+
+    # Step 9: Confidence
+    confidence = rate_info["confidence"] * 100
+
+    # Step 11: Determine status
+    if hours_until_watering < 4:
+        status = "WATER_SOON"
+    else:
+        status = "MONITORING"
+
     return {
-        "hours_until_dry": round(hours_until_dry, 1),
-        "estimated_time": estimated_time.isoformat(),
-        "confidence": round(confidence, 2),
-        "message": f"Estimated watering needed in {round(hours_until_dry, 1)} hours",
-        "details": {
-            "current_moisture": current_moisture,
-            "threshold_dry": threshold_dry,
-            "depletion_rate": depletion_rate,
-            "readings_analyzed": rate_info["readings_analyzed"],
-            "analysis_period_hours": rate_info["time_period_hours"]
-        }
+        "next_watering_in_hours": round(hours_until_watering, 1),
+        "estimated_datetime": estimated_datetime.strftime(
+            "%Y-%m-%d %H:%M:%S"
+        ),
+        "estimated_time_friendly": estimated_time_friendly,
+        "current_moisture": round(current_moisture, 1),
+        "watering_threshold": watering_threshold,
+        "depletion_rate_per_hour": round(depletion_rate, 3),
+        "data_quality": rate_info["data_quality"],
+        "confidence": round(confidence),
+        "status": status,
+        "message": (
+            f"Estimated watering needed in "
+            f"{round(hours_until_watering, 1)} hours."
+        )
     }

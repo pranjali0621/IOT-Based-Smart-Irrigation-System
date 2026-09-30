@@ -17,6 +17,7 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.now)
     last_login = Column(DateTime, nullable=True)
     is_active = Column(Boolean, default=True)
+    is_admin = Column(Boolean, default=False)
     
     plants = relationship("Plant", back_populates="owner", cascade="all, delete-orphan")
 
@@ -27,9 +28,9 @@ class Plant(Base):
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     name = Column(String(100), nullable=False)
-    species = Column(String(100), nullable=True)
+    #species = Column(String(100), nullable=True)
     plant_picture = Column(LargeBinary, nullable=True)
-    location = Column(String(100), nullable=True)
+    #location = Column(String(100), nullable=True)
     description = Column(String(500), nullable=True)
     created_at = Column(DateTime, default=datetime.now)
     

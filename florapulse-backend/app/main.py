@@ -13,7 +13,8 @@ from app.database_models import (
 
 # ============= IMPORTS: Services & Utils =============
 from app.services.irrigation_engine import decide_irrigation
-from app.services.prediction_engine import estimate_next_watering, get_depletion_rate
+from app.services.prediction_engine import predict_next_watering, calculate_depletion_rate
+from app.services.weather_service import fetch_weather_forecast
 from app.utils.validators import validate_sensor_data
 from app.utils.auth import (
     hash_password, verify_password, 
@@ -21,9 +22,10 @@ from app.utils.auth import (
 )
 
 # ============= IMPORTS: Pydantic Models =============
+# pyrefly: ignore [missing-import]
 from app.models import (
     SensorDataRequest, 
-    UserCreate, UserLogin, UserResponse
+    UserCreate, UserLogin
 )
 
 # ============= CREATE APP =============
@@ -107,6 +109,7 @@ def login(credentials: UserLogin, db: Session = Depends(get_db)):
     return {
         "access_token": access_token,
         "token_type": "bearer",
+        "is_admin": user.is_admin,
         "user": {
             "id": user.id,
             "username": user.username,
@@ -150,46 +153,55 @@ def get_current_user(authorization: str = Header(None), db: Session = Depends(ge
 @app.post("/api/plants/create")
 def create_plant(
     name: str = Form(...),
-    species: str = Form(...),
-    location: str = Form(default="Unknown"),
+    sensor_id: str = Form(...),
     description: str = Form(default=""),
     authorization: str = Header(None),
     db: Session = Depends(get_db)
 ):
     """Create a new plant for authenticated user."""
+
     if not authorization:
         raise HTTPException(401, detail="Not authenticated")
-    
+
     if authorization.startswith("Bearer "):
         token = authorization[7:]
     else:
         token = authorization
-    
+
     token_data = decode_access_token(token)
+
     if not token_data:
         raise HTTPException(401, detail="Invalid token")
-    
+
     user = db.query(User).filter(User.id == token_data["user_id"]).first()
+
     if not user:
         raise HTTPException(404, detail="User not found")
-    
+
     new_plant = Plant(
         user_id=user.id,
         name=name,
-        species=species,
-        location=location,
         description=description
     )
-    
+
     db.add(new_plant)
     db.commit()
     db.refresh(new_plant)
-    
+
+    new_sensor = Sensor(
+        plant_id=new_plant.id,
+        sensor_id=sensor_id
+    )
+
+    db.add(new_sensor)
+    db.commit()
+    db.refresh(new_sensor)
+
     return {
         "id": new_plant.id,
         "name": new_plant.name,
-        "species": new_plant.species,
-        "location": new_plant.location,
+        "sensor_id": new_sensor.sensor_id,
+        "description": new_plant.description,
         "created_at": new_plant.created_at,
         "message": "Plant created successfully"
     }
@@ -217,8 +229,6 @@ def get_user_plants(authorization: str = Header(None), db: Session = Depends(get
             {
                 "id": p.id,
                 "name": p.name,
-                "species": p.species,
-                "location": p.location,
                 "created_at": p.created_at,
                 "sensors_count": len(p.sensors)
             }
@@ -257,12 +267,38 @@ def get_plant_details(
     return {
         "id": plant.id,
         "name": plant.name,
-        "species": plant.species,
-        "location": plant.location,
         "description": plant.description,
         "created_at": plant.created_at,
         "sensors_count": len(plant.sensors)
     }
+
+@app.get("/api/plants/{plant_id}/depletion-rate")
+def get_plant_depletion_rate(
+    plant_id: int,
+    db: Session = Depends(get_db)
+):
+    """Get current soil moisture depletion rate for a plant."""
+
+    result = calculate_depletion_rate(
+        db,
+        plant_id=plant_id,
+        hours_lookback=24
+    )
+
+    return result
+
+
+@app.get("/api/plants/{plant_id}/next-watering-prediction")
+def get_next_watering_prediction(
+    plant_id: int,
+    db: Session = Depends(get_db)
+):
+    """Predict when a plant will next require watering."""
+
+    return predict_next_watering(
+        db,
+        plant_id=plant_id
+    )
 
 
 # ============================================================================
@@ -465,16 +501,31 @@ def get_system_status(db: Session = Depends(get_db)):
 # ============================================================================
 # IRRIGATION DECISION ENDPOINTS
 # ============================================================================
-
 @app.post("/api/irrigation/decide")
-def get_irrigation_decision(request: SensorDataRequest, db: Session = Depends(get_db)):
-    """Get irrigation decision for current conditions."""
+def get_irrigation_decision(
+    request: SensorDataRequest,
+    db: Session = Depends(get_db)
+):
+    """Get irrigation decision using sensor and weather data."""
+
+    # Fetch weather forecast
+    weather = fetch_weather_forecast("Mumbai")
+
+    # Make irrigation decision
     result = decide_irrigation(
         request.moisture,
-        request.rain_detected
+        request.rain_detected,
+        weather["rain_probability"]
     )
-    
-    return result
+
+    return {
+        "decision": result["decision"],
+        "reason": result["reason"],
+        "confidence": result["confidence"],
+        "forecast_rain_probability": weather["rain_probability"],
+        "sensor_rain_detected": request.rain_detected,
+        "current_moisture": request.moisture
+    }
 
 
 # ============================================================================
@@ -581,3 +632,94 @@ def root():
         "docs": "http://localhost:8000/docs",
         "version": "1.0.0"
     }
+
+
+# ============================================================================
+# ADMIN ENDPOINTS
+# ============================================================================
+
+def get_admin_user(authorization: str = Header(None), db: Session = Depends(get_db)):
+    if not authorization:
+        raise HTTPException(401, detail="Not authenticated")
+    
+    if authorization.startswith("Bearer "):
+        token = authorization[7:]
+    else:
+        token = authorization
+    
+    token_data = decode_access_token(token)
+    if not token_data:
+        raise HTTPException(401, detail="Invalid token")
+        
+    user = db.query(User).filter(User.id == token_data["user_id"]).first()
+    if not user:
+        raise HTTPException(404, detail="User not found")
+        
+    if not user.is_admin:
+        raise HTTPException(403, detail="Not authorized. Admins only.")
+        
+    return user
+
+
+@app.get("/api/admin/users")
+def admin_get_users(admin: User = Depends(get_admin_user), db: Session = Depends(get_db)):
+    """Admin only: get all users"""
+    users = db.query(User).all()
+    return [
+        {
+            "id": u.id,
+            "username": u.username,
+            "email": u.email,
+            "full_name": u.full_name,
+            "created_at": u.created_at
+        }
+        for u in users
+    ]
+
+
+@app.get("/api/admin/plants")
+def admin_get_plants(admin: User = Depends(get_admin_user), db: Session = Depends(get_db)):
+    """Admin only: get all plants"""
+    plants = db.query(Plant).all()
+    return [
+        {
+            "id": p.id,
+            "plant_name": p.name,
+            "owner_username": p.owner.username if p.owner else "Unknown",
+            "created_at": p.created_at
+        }
+        for p in plants
+    ]
+
+
+@app.get("/api/admin/sensors")
+def admin_get_sensors(admin: User = Depends(get_admin_user), db: Session = Depends(get_db)):
+    """Admin only: get all sensors"""
+    sensors = db.query(Sensor).all()
+    return [
+        {
+            "sensor_id": s.sensor_id,
+            "plant_name": s.plant.name if s.plant else "Unknown",
+            "owner_username": s.plant.owner.username if s.plant and s.plant.owner else "Unknown",
+            "is_connected": s.is_connected,
+            "last_data_received": s.last_data_received
+        }
+        for s in sensors
+    ]
+
+
+@app.get("/api/admin/readings")
+def admin_get_readings(limit: int = 100, admin: User = Depends(get_admin_user), db: Session = Depends(get_db)):
+    """Admin only: get recent readings"""
+    readings = db.query(SensorReading).order_by(SensorReading.timestamp.desc()).limit(limit).all()
+    return [
+        {
+            "sensor_id": r.sensor.sensor_id if r.sensor else "Unknown",
+            "plant_name": r.sensor.plant.name if r.sensor and r.sensor.plant else "Unknown",
+            "moisture": r.moisture,
+            "temperature": r.temperature,
+            "humidity": r.humidity,
+            "timestamp": r.timestamp
+        }
+        for r in readings
+    ]

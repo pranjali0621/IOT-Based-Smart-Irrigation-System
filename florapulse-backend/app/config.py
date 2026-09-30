@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     # API
     api_host: str = "0.0.0.0"
     api_port: int = 8000
+    openweather_api_key: str
     
     # Irrigation Thresholds
     moisture_threshold_dry: float = 35.0

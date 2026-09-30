@@ -25,11 +25,15 @@ Example Usage:
     >>> result['confidence']
     0.95
 """
+# pyrefly: ignore [missing-import]
 from app.config import settings
 
 
-def decide_irrigation(moisture: float, rain_detected: bool, 
-                     forecast_rain: bool = False) -> dict:
+def decide_irrigation(
+    moisture: float,
+    rain_detected: bool,
+    forecast_rain_probability: float = 0
+) -> dict:
     """
     Make irrigation decision based on soil moisture and weather.
     
@@ -86,37 +90,45 @@ def decide_irrigation(moisture: float, rain_detected: bool,
     threshold_optimal = settings.moisture_threshold_optimal  # 50%
     
     # Check rain status (either current or forecast)
-    any_rain = rain_detected or forecast_rain
+    sensor_says_rain = rain_detected
+    forecast_says_rain = forecast_rain_probability > 50
+    any_rain = sensor_says_rain or forecast_says_rain
     
-    # Apply decision logic
-    if moisture < threshold_dry and not any_rain:
-        # CASE 1: Dry soil AND no rain → Water now
+    # Apply combined decision logic
+    if moisture < threshold_dry and not sensor_says_rain and not forecast_says_rain:
+        # Low moisture + no rain
         decision = "WATER"
-        reason = (f"Soil moisture {moisture:.1f}% is below dry threshold "
-                 f"({threshold_dry}%) and no rain detected")
+        reason = (
+            f"Watering: Low moisture ({moisture:.1f}%) "
+            f"+ no rain detected/forecast"
+        )
         confidence = 0.95
         action = "START_PUMP"
-        
-    elif any_rain:
-        # CASE 2: Rain detected OR forecast → Skip (avoid overwatering)
+
+    elif sensor_says_rain:
+        # Rain sensor is active
         decision = "SKIP"
-        rain_source = "Local sensor" if rain_detected else "Weather forecast"
-        reason = f"Rain detected ({rain_source}). Skipping to avoid overwatering"
-        confidence = 0.98  # Most confident (rain is clear signal)
+        reason = "Skipping: Rain detected by sensor"
+        confidence = 0.98
         action = "NONE"
-        
-    elif moisture < threshold_optimal:
-        # CASE 3: Not dry but not optimal → Monitor
-        decision = "MONITOR"
-        reason = (f"Soil moisture {moisture:.1f}% is adequate but below optimal "
-                 f"({threshold_optimal}%). Monitor next reading")
-        confidence = 0.85
+
+    elif forecast_says_rain:
+        # Rain is forecast
+        decision = "SKIP"
+        reason = (
+            f"Skipping: Rain forecast "
+            f"({forecast_rain_probability:.0f}% probability)"
+        )
+        confidence = 0.90
         action = "NONE"
-        
+
     else:
-        # CASE 4: Everything good → Skip
+        # Moisture is adequate
         decision = "SKIP"
-        reason = f"Soil moisture {moisture:.1f}% is adequate"
+        reason = (
+            f"Skipping: Moisture still adequate "
+            f"({moisture:.1f}%)"
+        )
         confidence = 0.90
         action = "NONE"
     
@@ -128,8 +140,8 @@ def decide_irrigation(moisture: float, rain_detected: bool,
             "moisture_level": moisture,
             "threshold_dry": threshold_dry,
             "threshold_optimal": threshold_optimal,
-            "rain_detected": rain_detected,
-            "forecast_rain": forecast_rain,
+            "rain_detected": sensor_says_rain,
+            "forecast_rain_probability": forecast_rain_probability,
             "action": action
         }
     }
