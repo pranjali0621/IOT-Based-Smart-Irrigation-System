@@ -305,55 +305,59 @@ def get_next_watering_prediction(
 # SENSOR MANAGEMENT ENDPOINTS
 # ============================================================================
 
-@app.post("/api/sensors/register")
-def register_sensor(
-    plant_id: int = Form(...),
-    sensor_id: str = Form(...),
-    sensor_name: str = Form(...),
-    authorization: str = Header(None),
-    db: Session = Depends(get_db)
-):
-    """Register a sensor for a plant."""
+@app.get("/api/sensors/my-sensors")
+def get_my_sensors(authorization: str = Header(None), db: Session = Depends(get_db)):
+    """
+    Return all sensors belonging to the authenticated user's plants,
+    each enriched with the latest sensor reading values.
+    Used by the Sensors dashboard page.
+    """
     if not authorization:
         raise HTTPException(401, detail="Not authenticated")
-    
-    if authorization.startswith("Bearer "):
-        token = authorization[7:]
-    else:
-        token = authorization
-    
+
+    token = authorization[7:] if authorization.startswith("Bearer ") else authorization
     token_data = decode_access_token(token)
     if not token_data:
         raise HTTPException(401, detail="Invalid token")
-    
-    plant = db.query(Plant).filter(
-        Plant.id == plant_id,
-        Plant.user_id == token_data["user_id"]
-    ).first()
-    
-    if not plant:
-        raise HTTPException(404, detail="Plant not found")
-    
-    existing = db.query(Sensor).filter(Sensor.sensor_id == sensor_id).first()
-    if existing:
-        raise HTTPException(400, detail="Sensor ID already registered")
-    
-    new_sensor = Sensor(
-        plant_id=plant_id,
-        sensor_id=sensor_id,
-        sensor_name=sensor_name,
-        is_connected=False
+
+    user_id = token_data["user_id"]
+
+    # Get all plants owned by this user
+    user_plants = db.query(Plant).filter(Plant.user_id == user_id).all()
+    plant_map = {p.id: p.name for p in user_plants}
+
+    if not plant_map:
+        return {"sensors": []}
+
+    # Get all sensors linked to those plants
+    sensors = (
+        db.query(Sensor)
+        .filter(Sensor.plant_id.in_(list(plant_map.keys())))
+        .all()
     )
-    
-    db.add(new_sensor)
-    db.commit()
-    db.refresh(new_sensor)
-    
-    return {
-        "sensor_id": new_sensor.sensor_id,
-        "plant_id": plant_id,
-        "message": "Sensor registered successfully"
-    }
+
+    result = []
+    for sensor in sensors:
+        latest = (
+            db.query(SensorReading)
+            .filter(SensorReading.sensor_id == sensor.id)
+            .order_by(SensorReading.timestamp.desc())
+            .first()
+        )
+        result.append({
+            "sensor_id": sensor.sensor_id,
+            "plant_name": plant_map.get(sensor.plant_id, f"Plant {sensor.plant_id}"),
+            "plant_id": sensor.plant_id,
+            "is_connected": sensor.is_connected,
+            "last_data_received": sensor.last_data_received.isoformat() if sensor.last_data_received else None,
+            "latest_moisture": round(latest.moisture, 1) if latest else None,
+            "latest_temperature": round(latest.temperature, 1) if latest and latest.temperature else None,
+            "latest_humidity": round(latest.humidity, 1) if latest and latest.humidity else None,
+            "rain_detected": latest.rain_detected if latest else False,
+            "last_reading_at": latest.timestamp.isoformat() if latest else None,
+        })
+
+    return {"sensors": result}
 
 
 @app.get("/api/sensors/{sensor_id}/status")
@@ -385,6 +389,67 @@ def get_sensor_status(sensor_id: str, db: Session = Depends(get_db)):
 # SENSOR DATA ENDPOINTS
 # ============================================================================
 
+@app.post("/api/sensors/register")
+def register_sensor(
+    sensor_id: str = Form(...),
+    plant_id: int = Form(...),
+    authorization: str = Header(None),
+    db: Session = Depends(get_db)
+):
+    """
+    Register a sensor string-ID against an existing plant.
+    Called by simulator scripts before they start posting data.
+    Requires the plant to belong to the authenticated user.
+    """
+    if not authorization:
+        raise HTTPException(401, detail="Not authenticated")
+
+    token = authorization[7:] if authorization.startswith("Bearer ") else authorization
+    token_data = decode_access_token(token)
+    if not token_data:
+        raise HTTPException(401, detail="Invalid token")
+
+    # Verify plant ownership
+    plant = db.query(Plant).filter(
+        Plant.id == plant_id,
+        Plant.user_id == token_data["user_id"]
+    ).first()
+    if not plant:
+        raise HTTPException(404, detail=f"Plant {plant_id} not found or not owned by you")
+
+    # Upsert sensor
+    existing = db.query(Sensor).filter(Sensor.sensor_id == sensor_id).first()
+    if existing:
+        if existing.plant_id != plant_id:
+            raise HTTPException(
+                409,
+                detail=f"Sensor '{sensor_id}' is already registered to another plant"
+            )
+        return {
+            "status": "already_registered",
+            "sensor_id": sensor_id,
+            "plant_id": plant_id,
+            "message": "Sensor already registered to this plant"
+        }
+
+    new_sensor = Sensor(
+        plant_id=plant_id,
+        sensor_id=sensor_id,
+        sensor_name=f"Sensor {sensor_id}",
+        is_connected=False,
+    )
+    db.add(new_sensor)
+    db.commit()
+    db.refresh(new_sensor)
+
+    return {
+        "status": "registered",
+        "sensor_id": sensor_id,
+        "plant_id": plant_id,
+        "message": "Sensor registered successfully"
+    }
+
+
 @app.post("/api/sensor-data/upload")
 def upload_sensor_data(request: SensorDataRequest, db: Session = Depends(get_db)):
     """Upload sensor data from ESP32."""
@@ -400,7 +465,14 @@ def upload_sensor_data(request: SensorDataRequest, db: Session = Depends(get_db)
     sensor = db.query(Sensor).filter(Sensor.sensor_id == request.sensor_id).first()
     
     if not sensor:
-        raise HTTPException(404, detail=f"Sensor {request.sensor_id} not registered")
+        raise HTTPException(
+            404,
+            detail=(
+                f"Sensor '{request.sensor_id}' not registered. "
+                "Call POST /api/sensors/register first, "
+                "or add the plant via the web app."
+            )
+        )
     
     sensor.is_connected = True
     sensor.last_data_received = datetime.now()
@@ -439,11 +511,13 @@ def upload_sensor_data(request: SensorDataRequest, db: Session = Depends(get_db)
     }
 
 
+
 @app.get("/api/sensor-data/history")
 def get_sensor_history(
     hours: int = 24,
     limit: int = 100,
     sensor_id: str = None,
+    plant_id: int = None,
     db: Session = Depends(get_db)
 ):
     """Get historical sensor readings."""
@@ -457,6 +531,11 @@ def get_sensor_history(
         sensor = db.query(Sensor).filter(Sensor.sensor_id == sensor_id).first()
         if sensor:
             query = query.filter(SensorReading.sensor_id == sensor.id)
+    elif plant_id:
+        sensors = db.query(Sensor).filter(Sensor.plant_id == plant_id).all()
+        if sensors:
+            sensor_ids = [s.id for s in sensors]
+            query = query.filter(SensorReading.sensor_id.in_(sensor_ids))
     
     readings = query.order_by(SensorReading.timestamp.desc()).limit(limit).all()
     
@@ -563,8 +642,15 @@ def get_next_watering_prediction(
                 raise HTTPException(404, detail="No sensor data available")
             
             current_moisture = latest.moisture
+            plant_id = latest.sensor.plant_id if latest.sensor else None
     
-    prediction = estimate_next_watering(db, current_moisture)
+    if 'plant_id' not in locals() or plant_id is None:
+        if sensor_id:
+            plant_id = sensor.plant_id
+        else:
+            raise HTTPException(404, detail="No plant data available to predict")
+
+    prediction = predict_next_watering(db, plant_id=plant_id)
     
     return prediction
 
@@ -574,25 +660,62 @@ def get_next_watering_prediction(
 # ============================================================================
 
 @app.get("/api/dashboard/live")
-def get_dashboard_data(db: Session = Depends(get_db)):
-    """Get aggregated data for dashboard."""
+def get_dashboard_data(
+    authorization: str = Header(None),
+    db: Session = Depends(get_db)
+):
+    """Get aggregated data for dashboard for the authenticated user."""
+    if not authorization:
+        raise HTTPException(401, detail="Not authenticated")
+    
+    if authorization.startswith("Bearer "):
+        token = authorization[7:]
+    else:
+        token = authorization
+    
+    token_data = decode_access_token(token)
+    if not token_data:
+        raise HTTPException(401, detail="Invalid token")
+        
+    user_id = token_data["user_id"]
+    
+    # Get user's plants
+    user_plants = db.query(Plant).filter(Plant.user_id == user_id).all()
+    if not user_plants:
+        raise HTTPException(404, detail="No plants found for user")
+        
+    plant_ids = [p.id for p in user_plants]
+    
+    # Get user's sensors
+    user_sensors = db.query(Sensor).filter(Sensor.plant_id.in_(plant_ids)).all()
+    sensor_ids = [s.id for s in user_sensors]
+    
+    if not sensor_ids:
+        raise HTTPException(404, detail="No sensors found for user")
+
     latest_reading = db.query(SensorReading)\
+        .filter(SensorReading.sensor_id.in_(sensor_ids))\
         .order_by(SensorReading.timestamp.desc())\
         .first()
     
     if not latest_reading:
-        raise HTTPException(404, detail="No sensor data available")
+        raise HTTPException(404, detail="No sensor data available for this user")
     
     recent = db.query(SensorReading)\
+        .filter(SensorReading.sensor_id.in_(sensor_ids))\
         .order_by(SensorReading.timestamp.desc())\
         .limit(10)\
         .all()
     
     latest_decision = db.query(IrrigationDecision)\
+        .filter(IrrigationDecision.plant_id.in_(plant_ids))\
         .order_by(IrrigationDecision.timestamp.desc())\
         .first()
     
-    prediction = estimate_next_watering(db, latest_reading.moisture)
+    if plant_ids:
+        prediction = predict_next_watering(db, plant_id=plant_ids[0])
+    else:
+        prediction = None
     
     return {
         "latest_reading": {

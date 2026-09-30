@@ -271,6 +271,7 @@ def handle_login() -> None:
                 st.session_state.auth_token = token
                 st.session_state.is_admin = data.get("is_admin", False)
                 st.session_state.username = data.get("username", "")
+                st.session_state.pop("plants", None)  # clear cached plants
                 st.toast("Login successful! ✅", icon="✅")
                 time.sleep(1)
 

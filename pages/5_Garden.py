@@ -561,6 +561,7 @@ with left_col:
                     st.session_state.error_message = ""
                     st.session_state.plant_added = True
                     st.session_state.last_sensor_id = sensor_id.strip()
+                    st.session_state.pop("plants", None)  # clear cached plants
                     st.toast("Plant added! ✅")
                     time.sleep(1)
                     st.switch_page("pages/6_Dashboard.py")
