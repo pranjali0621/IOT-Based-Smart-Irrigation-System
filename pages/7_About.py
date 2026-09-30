@@ -498,6 +498,9 @@ st.markdown("""
 # ═════════════════════════════════════════════════════════════
 # 1. HERO SECTION
 # ═════════════════════════════════════════════════════════════
+if st.button("← Back to Dashboard"):
+    st.switch_page("pages/6_Dashboard.py")
+
 st.markdown("""
 <div class="hero-section">
     <div class="pill-badge">🍃 low-stress plant parenting • 100% cozy vibes only ✨</div>

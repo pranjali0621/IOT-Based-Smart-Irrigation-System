@@ -5,6 +5,37 @@ import streamlit as st
 
 st.set_page_config(page_title="Create Your Garden", layout="wide")
 
+st.session_state.setdefault("auth_token", None)
+
+# Guard: ensure user is logged in
+if not st.session_state.get("auth_token"):
+    st.warning("You must log in to access the Create page.")
+    if st.button("Go to Login"):
+        st.switch_page("pages/2_Login.py")
+    st.stop()
+
+# Auto-redirect for admin
+if st.session_state.get("is_admin"):
+    st.switch_page("pages/9_Admin.py")
+
+import requests
+
+BACKEND_URL = "http://localhost:8000"
+token = st.session_state.get("auth_token")
+
+# Step 1 & 2: Check if user has plants
+def check_user_plants():
+    try:
+        res = requests.get(f"{BACKEND_URL}/api/plants/my-plants", headers={"Authorization": f"Bearer {token}"}, timeout=5)
+        if res.status_code == 200:
+            plants = res.json().get("plants", [])
+            return len(plants) > 0
+    except:
+        pass
+    return False
+
+st.session_state.has_plants = check_user_plants()
+
 # ---- Path to the background image (lives in the "assets" folder) ----
 BG_IMAGE_PATH = Path(__file__).parent / "assets" / "create.png"
 
@@ -54,12 +85,23 @@ st.markdown(
         left: 0;
     }}
 
-    div[data-testid="stButton"] {{
+    .st-key-button_wrapper {{
         position: fixed;
         left: 38.7%;
         top: 72.8%;
         width: 26.5%;
         z-index: 10;
+    }}
+
+    /* Streamlit wraps buttons in multiple divs. We want them stacked with a gap */
+    .st-key-button_wrapper > div > div {{
+        display: flex;
+        flex-direction: column;
+        gap: 1.5vh;
+    }}
+
+    div[data-testid="stButton"] {{
+        width: 100%;
     }}
 
     div[data-testid="stButton"] > button {{
@@ -119,11 +161,23 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-clicked = st.button("Create Your Garden", key="create_garden_btn")
-
-if clicked:
-    garden_path = Path(__file__).parent / "5_Garden.py"
-    if garden_path.exists():
-        st.switch_page("pages/5_Garden.py")
+# Step 3: Show different button based on has_plants
+with st.container(key="button_wrapper"):
+    if st.session_state.has_plants:
+        if st.button("📊 Go to Dashboard", key="go_dashboard_btn"):
+            st.switch_page("pages/6_Dashboard.py")
+        if st.button("🌱 Add Another Plant", key="create_garden_btn"):
+            st.switch_page("pages/5_Garden.py")
     else:
-        st.toast("Garden page not found. Please add pages/5_Garden.py", icon="⚠️")
+        if st.button("🌱 Add Your First Plant", key="create_garden_btn"):
+            st.switch_page("pages/5_Garden.py")
+
+# Optional header
+def add_header():
+    if st.session_state.has_plants:
+        st.title("Welcome back!")
+        st.write("Go to your dashboard to monitor your plants.")
+    else:
+        st.title("Welcome! Ready to grow?")
+        st.write("Set up your first plant to get started")
+add_header()

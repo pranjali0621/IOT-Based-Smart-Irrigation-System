@@ -103,6 +103,9 @@ def hr(h): return f"{h % 12 or 12}" + (" AM" if h % 24 < 12 else " PM")
 def temp_at(c, h): return c["t"] - 3 + 6 * math.sin((h - 9) / 24 * 2 * math.pi)
 
 # ---------- header + controls ----------
+if st.button("← Back to Dashboard"):
+    st.switch_page("pages/6_Dashboard.py")
+
 now = datetime.now()
 H0 = now.hour
 left, mid, right = st.columns([5, 2, 1.3], vertical_alignment="center", gap="medium")

@@ -1,6 +1,8 @@
 import base64
 import os
 import streamlit as st
+import requests
+import time
 
 # ==================================================
 # PAGE CONFIG
@@ -17,6 +19,8 @@ st.set_page_config(
 # ==================================================
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 BACKGROUND_PATH = os.path.join(APP_DIR, "assets", "garden_bg.png")
+
+BACKEND_URL = "http://localhost:8000"
 
 
 def get_base64(path: str) -> str:
@@ -57,6 +61,13 @@ if "error_message" not in st.session_state:
 # ==================================================
 # CSS
 # ==================================================
+# ================= Auth Guard =================
+if st.session_state.get("auth_token") is None:
+    st.markdown("<div class='error-text'>You must login first.</div>", unsafe_allow_html=True)
+    if st.button("Go to Login", key="login_redirect_btn"):
+        st.switch_page("pages/2_Login.py")
+    st.stop()
+
 st.markdown(
     f"""
     <style>
@@ -505,19 +516,70 @@ with left_col:
                     st.session_state.uploader_version += 1
                     st.rerun()
 
+        def handle_add_plant():
+            """Validate input and send plant data to backend."""
+            if not plant_name.strip():
+                st.session_state.error_message = "Please enter a plant name."
+                return
+
+            if not sensor_id.strip():
+                st.session_state.error_message = "Please enter a sensor ID."
+                return
+
+            data = {
+                "name": plant_name.strip(),
+                "sensor_id": sensor_id.strip(),
+                "description": plant_description.strip(),
+            }
+
+            # Prepare photo for multipart upload if one exists.
+            files = None
+            if st.session_state.get("plant_image_b64"):
+                photo_bytes = base64.b64decode(st.session_state.plant_image_b64)
+                files = {
+                    "photo": (
+                        st.session_state.plant_image_name,
+                        photo_bytes,
+                        st.session_state.plant_image_mime,
+                    )
+                }
+
+            headers = {
+                "Authorization": f"Bearer {st.session_state.auth_token}"
+            }
+
+            try:
+                response = requests.post(
+                    f"{BACKEND_URL}/api/plants/create",
+                    data=data,
+                    files=files,
+                    headers=headers,
+                    timeout=10,
+                )
+
+                if response.status_code == 200:
+                    st.session_state.error_message = ""
+                    st.session_state.plant_added = True
+                    st.session_state.last_sensor_id = sensor_id.strip()
+                    st.toast("Plant added! ✅")
+                    time.sleep(1)
+                    st.switch_page("pages/6_Dashboard.py")
+                else:
+                    try:
+                        msg = response.json().get("detail", response.text)
+                    except Exception:
+                        msg = response.text
+                    st.session_state.error_message = f"Error: {msg}"
+                    st.session_state.plant_added = False
+
+            except requests.RequestException as e:
+                st.session_state.error_message = f"Exception: {e}"
+                st.session_state.plant_added = False
+
         add_clicked = st.button("Add Plant", key="add_plant_btn")
 
         if add_clicked:
-            if not plant_name.strip():
-                st.session_state.error_message = "Please enter a plant name."
-                st.session_state.plant_added = False
-            elif not sensor_id.strip():
-                st.session_state.error_message = "Please enter a sensor ID."
-                st.session_state.plant_added = False
-            else:
-                st.session_state.error_message = ""
-                st.session_state.last_sensor_id = sensor_id.strip()
-                st.session_state.plant_added = True
+            handle_add_plant()
 
         if st.session_state.error_message:
             st.markdown(

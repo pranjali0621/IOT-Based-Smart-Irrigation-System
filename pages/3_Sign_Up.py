@@ -18,6 +18,8 @@ position below is written in units of the original 1366x768 design:
 so the form scales together with the artwork at any window size.
 """
 import base64
+import requests
+import time
 import re
 from pathlib import Path
 
@@ -25,12 +27,18 @@ import streamlit as st
 
 BACKGROUND_PATH = Path(__file__).parent / "assets" / "signup.png"
 
+# Backend configuration
+BACKEND_URL = "http://localhost:8000"
+
 st.set_page_config(
     page_title="Sign Up",
     page_icon="🌿",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+
+st.session_state.setdefault("auth_token", None)
+st.session_state.setdefault("signup_success", False)
 
 
 # ----------------------------------------------------------------------------
@@ -246,6 +254,21 @@ def validate(identifier: str, pw: str, confirm: str, accepted: bool) -> list[str
         errors.append("Accept the terms and conditions to continue.")
     return errors
 
+def validate_signup_form(username: str, email: str, password: str, password_confirm: str, full_name: str) -> tuple[bool, str]:
+    # Ensure no empty fields
+    if not all([username.strip(), email.strip(), password, password_confirm, full_name.strip()]):
+        return False, "All fields required"
+    # Simple email validation
+    if "@" not in email or "." not in email:
+        return False, "Invalid email format"
+    if len(password) < 6:
+        return False, "Password must be at least 6 characters"
+    if password != password_confirm:
+        return False, "Passwords don't match"
+    if len(username.strip()) < 3:
+        return False, "Username must be at least 3 characters"
+    return True, "Valid"
+
 
 # ----------------------------------------------------------------------------
 # Page
@@ -255,24 +278,54 @@ def signup_page() -> None:
     _, form, _ = st.columns([382, 508, 476])
 
     with form:
-        identifier = st.text_input("Enter Email or Phone no.", key="su_ident")
+        username = st.text_input("Username", key="su_username")
+        email = st.text_input("Email", key="su_email")
+        full_name = st.text_input("Full Name", key="su_full_name")
         password = st.text_input("Set Password", type="password", key="su_pw")
-        confirm = st.text_input("Confirm Password", type="password", key="su_confirm")
+        password_confirm = st.text_input("Confirm Password", type="password", key="su_confirm")
         accepted = st.checkbox("I have accepted all terms and conditions.", value=True, key="su_terms")
 
         signed_up = st.button("Sign Up", type="primary", key="su_submit")
         google = st.button("Continue with Google", key="su_google")
-
         if signed_up:
-            errors = validate(identifier, password, confirm, accepted)
-            if errors:
-                st.toast("\n\n".join(errors), icon="⚠️")
+            # Validate signup form
+            valid, msg = validate_signup_form(username, email, password, password_confirm, full_name)
+            if not valid:
+                st.toast(msg, icon="⚠️")
+                # stop further processing
+                st.stop()
             else:
-                st.session_state.user = identifier.strip()
-                st.toast("Welcome aboard! Your account has been created.", icon="🌱")
-                st.switch_page("pages/4_Create.py")
+                # Call backend registration endpoint
+                try:
+                    response = requests.post(
+                        f"{BACKEND_URL}/api/auth/register",
+                        json={
+                            "username": username.strip(),
+                            "email": email.strip(),
+                            "password": password,
+                            "full_name": full_name.strip()
+                        },
+                        timeout=10,
+                    )
+                    if response.status_code == 200:
+                        st.session_state.signup_success = True
+                    else:
+                        try:
+                            err_msg = response.json().get("detail", response.text)
+                        except Exception:
+                            err_msg = response.text
+                        st.toast(f"Sign up error: {err_msg}", icon="❌")
+                except requests.RequestException as e:
+                    st.toast(f"Sign up error: {e}", icon="❌")
+
         if google:
             st.toast("Google sign-in isn't connected yet. Add your OAuth flow here.", icon="ℹ️")
+
+if st.session_state.get("signup_success", False):
+    st.toast("Account created! Go to login to sign in ✅", icon="✅")
+    if st.button("← Go to Login"):
+        st.session_state.signup_success = False
+        st.switch_page("pages/2_Login.py")
 
 
 inject_css()

@@ -61,6 +61,9 @@ st.markdown(
 # ---------------------------------------------------------------------------
 # Header
 # ---------------------------------------------------------------------------
+if st.button("← Back to Dashboard"):
+    st.switch_page("pages/6_Dashboard.py")
+
 st.markdown("<h1 class='app-title'>🌿Sensors</h1>", unsafe_allow_html=True)
 st.markdown(
     "<p class='app-sub'>Hardware tuned to nature's frequency</p>",

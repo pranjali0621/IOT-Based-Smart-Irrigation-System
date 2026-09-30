@@ -3,6 +3,10 @@ import re
 from pathlib import Path
 
 import streamlit as st
+import requests
+import time
+
+st.session_state.setdefault("auth_token", None)
 
 # ----------------------------------------------------------------------------
 # CONFIG
@@ -10,6 +14,9 @@ import streamlit as st
 ASSET_DIR = Path(__file__).parent / "assets"
 BG_STEM = "background"
 REF_W, REF_H = 1366, 768          # size of the background design
+
+# Backend configuration
+BACKEND_URL = "http://localhost:8000"
 
 # name: (x, y, width)  -> pixels on the 1366 x 768 design, top-left origin
 LAYOUT = {
@@ -247,16 +254,45 @@ def handle_login() -> None:
     user = st.session_state.get("login_user", "").strip()
     pwd = st.session_state.get("login_pwd", "")
     if not user or not pwd:
-        st.toast("Please enter your username/email and password.", icon="🌱")
+        st.toast("Please enter credentials", icon="⚠️")
         return
 
-    # TODO: replace with real authentication (database / API / hashed check)
-    st.session_state.user = user
-    st.switch_page("pages/4_Create.py")
+    try:
+        response = requests.post(
+            f"{BACKEND_URL}/api/auth/login",
+            json={"username": user, "password": pwd},
+            timeout=10,
+        )
+        if response.status_code == 200:
+            data = response.json()
+            token = data.get("access_token")
+            if token:
+                st.session_state.user = user
+                st.session_state.auth_token = token
+                st.session_state.is_admin = data.get("is_admin", False)
+                st.session_state.username = data.get("username", "")
+                st.toast("Login successful! ✅", icon="✅")
+                time.sleep(1)
+
+# st.experimental_rerun()  # removed to avoid interfering navigation
+# st.experimental_rerun()  # removed to allow proper navigation
+            else:
+                st.toast("Login failed: No token received.", icon="⚠️")
+        else:
+            try:
+                err_msg = response.json().get("detail", response.text)
+            except Exception:
+                err_msg = response.text
+            st.toast(f"Login error: {err_msg}", icon="❌")
+    except requests.RequestException as e:
+        st.toast(f"Login request failed: {e}", icon="❌")
 
 
 def go_to_signup() -> None:
     st.switch_page("pages/3_Sign_Up.py")
+
+if st.session_state.get("auth_token", False):
+    st.switch_page("pages/4_Create.py")
 
 
 # ----------------------------------------------------------------------------

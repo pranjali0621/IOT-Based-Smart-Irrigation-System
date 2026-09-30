@@ -113,7 +113,7 @@ def initials(name):
 # ---------- callbacks ----------
 def go_back():
     try:
-        st.switch_page("settings.py")
+        st.switch_page("pages/6_Dashboard.py")
     except Exception:
         st.toast("Open settings.py from your app navigation")
 
